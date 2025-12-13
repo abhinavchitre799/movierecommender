@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Movie Recommendation Agent</title>
+  <style>
+    :root {
+      --bg: #0a0f1c;
+      --panel: #0f172a;
+      --card: #111827;
+      --border: #1f2937;
+      --accent: #22c55e;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --highlight: #1d4ed8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 20% 20%, rgba(46, 71, 148, 0.12), transparent 40%), radial-gradient(circle at 80% 60%, rgba(34, 197, 94, 0.14), transparent 40%), var(--bg);
+      font-family: "Segoe UI", sans-serif;
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .layout {
+      width: 100%;
+      max-width: 1200px;
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 16px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.35);
+      height: 75vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      letter-spacing: 0.2px;
+    }
+    .user-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .user-row {
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--card);
+      cursor: pointer;
+      transition: border 0.12s ease, transform 0.12s ease;
+    }
+    .user-row:hover {
+      border-color: var(--highlight);
+      transform: translateY(-1px);
+    }
+    .user-row.active {
+      border-color: var(--accent);
+      box-shadow: 0 10px 24px rgba(34, 197, 94, 0.25);
+    }
+    .user-label {
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .user-desc {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .chat-shell {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.35);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      height: 75vh;
+    }
+    .chat-header {
+      padding: 16px 20px;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .chat-header h1 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0.2px;
+    }
+    .status {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .chat-window {
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: radial-gradient(circle at 15% 25%, rgba(46, 71, 148, 0.1), transparent 45%),
+                  radial-gradient(circle at 80% 70%, rgba(34, 197, 94, 0.1), transparent 40%),
+                  var(--panel);
+    }
+    .bubble {
+      padding: 12px 14px;
+      border-radius: 14px;
+      max-width: 85%;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .user {
+      align-self: flex-end;
+      background: #2563eb;
+      color: var(--text);
+    }
+    .bot {
+      align-self: flex-start;
+      background: var(--card);
+      border: 1px solid var(--border);
+    }
+    .system {
+      align-self: center;
+      background: rgba(148, 163, 184, 0.16);
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .controls {
+      padding: 16px 20px;
+      background: var(--card);
+      border-top: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+    }
+    .controls input, .controls button {
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      outline: none;
+      font-size: 14px;
+    }
+    .controls button {
+      background: var(--accent);
+      color: #0b1220;
+      cursor: pointer;
+      font-weight: 600;
+      transition: transform 0.1s ease, box-shadow 0.1s ease;
+    }
+    .controls button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 20px rgba(34, 197, 94, 0.3);
+    }
+    @media (max-width: 960px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+      .panel, .chat-shell {
+        height: auto;
+      }
+    }
+    @media (max-width: 640px) {
+      .bubble { max-width: 100%; }
+      .controls { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="panel">
+      <h2>Select a user</h2>
+      <div id="userList" class="user-list"></div>
+      <p class="status" id="activeUserStatus">No user selected.</p>
+    </aside>
+
+    <div class="chat-shell">
+      <div class="chat-header">
+        <h1>AI Movie Guide</h1>
+        <span class="status">Strategy-aware recommendations</span>
+      </div>
+      <div id="chatWindow" class="chat-window"></div>
+      <form id="chatForm" class="controls">
+        <input type="text" id="message" name="message" placeholder="Tell me what you're in the mood for (optional)" />
+        <button type="submit">Send</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const chatWindow = document.getElementById("chatWindow");
+    const chatForm = document.getElementById("chatForm");
+    const messageInput = document.getElementById("message");
+    const userList = document.getElementById("userList");
+    const activeUserStatus = document.getElementById("activeUserStatus");
+
+    const users = [
+      { id: "user1", label: "User 1", desc: "Heavy suspense/thriller fan; nearly cleared the suspense catalog." },
+      { id: "user2", label: "User 2", desc: "Romance + comedy lover with a dash of drama." },
+      { id: "user3", label: "User 3", desc: "Mixed tastes: suspense, sci-fi, and drama blends." },
+    ];
+
+    let selectedUserId = null;
+
+    users.forEach((user) => {
+      const row = document.createElement("div");
+      row.className = "user-row";
+      row.dataset.userId = user.id;
+      row.innerHTML = `
+        <div class="user-label">${user.label}</div>
+        <div class="user-desc">${user.desc}</div>
+      `;
+      row.addEventListener("click", () => handleUserSelect(user.id));
+      userList.appendChild(row);
+    });
+
+    function handleUserSelect(userId) {
+      if (selectedUserId === userId) return;
+      selectedUserId = userId;
+      document.querySelectorAll(".user-row").forEach((row) => {
+        row.classList.toggle("active", row.dataset.userId === userId);
+      });
+      activeUserStatus.textContent = `Active user: ${userId}`;
+      clearChat();
+      addBubble(`Selected ${userId}. Fetching tailored picks...`, "system");
+      sendChat("Show me recommendations", { skipUserBubble: true });
+    }
+
+    function addBubble(text, type = "bot") {
+      const div = document.createElement("div");
+      div.className = `bubble ${type}`;
+      div.textContent = text;
+      chatWindow.appendChild(div);
+      chatWindow.scrollTop = chatWindow.scrollHeight;
+      return div;
+    }
+
+    function addThinking() {
+      return addBubble("Thinking...", "bot");
+    }
+
+    function clearChat() {
+      chatWindow.innerHTML = "";
+    }
+
+    async function sendChat(message, options = {}) {
+      const { skipUserBubble = false } = options;
+      if (!selectedUserId) {
+        addBubble("Pick a user from the table first.", "bot");
+        return;
+      }
+      const text = (message || "").trim() || "Show me recommendations";
+      if (!skipUserBubble) addBubble(text, "user");
+      const thinking = addThinking();
+
+      try {
+        const res = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: selectedUserId, message: text }),
+        });
+        const data = await res.json();
+        thinking.remove();
+        const decision = data.decision || {};
+        const strategyLine = decision.strategy ? `Strategy: ${decision.strategy}` : "";
+        const reasonLine = decision.reason ? `Reason: ${decision.reason}` : "";
+        const bodyText = data.response || "I couldn't generate a response.";
+        const finalText = [strategyLine, reasonLine, bodyText].filter(Boolean).join("\n\n");
+        addBubble(finalText, "bot");
+      } catch (err) {
+        thinking.remove();
+        addBubble("Something went wrong. Please try again.", "bot");
+        console.error(err);
+      }
+    }
+
+    chatForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const message = messageInput.value;
+      messageInput.value = "";
+      sendChat(message);
+    });
+  </script>
+</body>
+</html>

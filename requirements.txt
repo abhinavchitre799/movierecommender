@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+jinja2
+openai
+langgraph
+langchain-core
