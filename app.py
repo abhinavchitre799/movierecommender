@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import os
 import random
@@ -15,6 +16,8 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Movie Recommendation Agent")
 templates = Jinja2Templates(directory="templates")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("movie-recommender")
 
 random.seed(42)
 # Optional override; prefer env vars OPENAI_API_KEY_OVERRIDE or OPENAI_API_KEY instead of hardcoding secrets.
@@ -27,6 +30,7 @@ EMBEDDING_CACHE_PATH = Path(__file__).resolve().parent / "embeddings_cache.json"
 EMBEDDING_CACHE_LOCK = threading.Lock()
 EMBEDDING_CACHE: Dict[str, List[float]] = {}
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+EMBEDDINGS_ALLOW_RECOMPUTE = os.getenv("EMBEDDINGS_ALLOW_RECOMPUTE", "0").lower() in {"1", "true", "yes"}
 
 
 def get_openai_client():
@@ -271,6 +275,9 @@ def embed_text(text: str) -> Optional[List[float]]:
     cached = EMBEDDING_CACHE.get(text)
     if cached:
         return cached
+    if not EMBEDDINGS_ALLOW_RECOMPUTE:
+        logger.info("[embed] cache miss, recompute disabled; skipping embed for \"%s\"", text[:60])
+        return None
     client = get_openai_client()
     if not client:
         return None
@@ -681,6 +688,13 @@ def _node_intent(state: Dict[str, object]) -> Dict[str, object]:
             intent = {"label": label, "rationale": rationale, "constraints": constraints}
         except Exception:
             pass
+    logger.info(
+        "[intent] user=%s label=%s reason=%s message=\"%s\"",
+        user_id,
+        intent.get("label"),
+        intent.get("rationale"),
+        message,
+    )
 
     return {
         "intent": intent,
@@ -804,7 +818,7 @@ def _node_planner(state: Dict[str, object]) -> Dict[str, object]:
         tools.append("adjacent")
         reason += " Main genre nearly exhausted; branching to adjacent."
 
-    banned_ids = list(set(picked + (last_recs if label in {"refine", "dislike"} else [])))
+    banned_ids = list(set(picked + last_recs))
     plan = {
         "tools": tools,
         "limit": 8,
@@ -818,6 +832,14 @@ def _node_planner(state: Dict[str, object]) -> Dict[str, object]:
         "intent_label": label,
         "retry_broaden": retry_broaden,
     }
+    logger.info(
+        "[planner] user=%s intent=%s tools=%s reason=\"%s\" retry=%s",
+        state.get("userId"),
+        label,
+        plan.get("tools"),
+        plan.get("reason"),
+        retry_broaden,
+    )
     return {"plan": plan}
 
 
@@ -873,6 +895,13 @@ def _node_ranker(state: Dict[str, object]) -> Dict[str, object]:
     user_id = str(state.get("userId", ""))
     last_recs_by_user[user_id] = [m["id"] for m in final_recs]
     persist_state_to_disk()
+    logger.info(
+        "[ranker] user=%s picked=%s final_count=%s tools=%s",
+        user_id,
+        state.get("picked_movies"),
+        len(final_recs),
+        tools,
+    )
     return {"recommendations": final_recs}
 
 
@@ -1006,6 +1035,14 @@ def _node_critic(state: Dict[str, object]) -> Dict[str, object]:
         else:
             reason = f"{reason} | Retry requested but no better options found."
 
+    logger.info(
+        "[critic] user=%s verdict=%s fix=%s reason=\"%s\" recs=%s",
+        state.get("userId"),
+        verdict,
+        fix,
+        reason,
+        [m.get("id") for m in recs],
+    )
     return {"recommendations": recs, "critic": {"verdict": verdict, "reason": reason, "fix": fix}}
 
 def _node_explain(state: Dict[str, object]) -> Dict[str, object]:
@@ -1035,7 +1072,11 @@ def _node_explain(state: Dict[str, object]) -> Dict[str, object]:
             messages = [
                 {
                     "role": "system",
-                    "content": "You are a friendly movie recommender. Summarize picks and why they fit.",
+                    "content": (
+                        "You are a concise movie recommender. "
+                        "Return a short list where each item is: title (genres) — 6-12 words on why it fits. "
+                        "Be brief and avoid long sentences."
+                    ),
                 },
                 {
                     "role": "user",
@@ -1064,7 +1105,19 @@ def _node_explain(state: Dict[str, object]) -> Dict[str, object]:
             )
             content = completion.choices[0].message.content or ""
             if content.strip():
-                return {"response": content, "decision": decision}
+                item_count = sum(
+                    1
+                    for line in content.splitlines()
+                    if line.strip()[:1].isdigit()
+                )
+                if item_count < len(recs):
+                    logger.info(
+                        "[explain] LLM response looked truncated (items=%s expected=%s); using fallback",
+                        item_count,
+                        len(recs),
+                    )
+                else:
+                    return {"response": content, "decision": decision}
         except Exception:
             pass
 
@@ -1124,6 +1177,13 @@ async def chat(body: ChatRequest):
         critic = result_state.get("critic", {}) or {}
         critic_verdict = critic.get("verdict", "")
         final_state = result_state
+        logger.info(
+            "[chat] user=%s attempt=%s critic=%s response_preview=\"%s\"",
+            body.userId,
+            attempt + 1,
+            critic_verdict,
+            str(result_state.get("response", ""))[:120].replace("\n", " "),
+        )
         if critic_verdict != "retry":
             break
 
