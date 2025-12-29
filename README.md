@@ -2,6 +2,8 @@
 
 Chat-style movie recommender built with FastAPI + a lightweight UI. It uses summary-aware embeddings, content similarity, and adjacent-genre exploration to suggest titles, then learns from your picks.
 
+Overall, the app provides a chat interface where you select a user persona, receive tailored movie recommendations, and refine them by picking or skipping titles. It stores your picks in SQLite so future suggestions adapt over time while keeping the experience simple and transparent.
+
 ## Features
 - Strategy-aware recommendations (cold start vs content-based)
 - Summary + genre similarity for richer matching
