@@ -5,12 +5,13 @@ import random
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TypedDict
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from langgraph.graph import END, StateGraph
 
 app = FastAPI(title="Movie Recommendation Agent")
 templates = Jinja2Templates(directory="templates")
@@ -540,6 +541,122 @@ def parse_choice(user_id: str, message: str, recs: List[Dict[str, object]]) -> O
 
 
 # ------------------------
+# LangGraph
+# ------------------------
+
+
+class RecState(TypedDict, total=False):
+    user_id: str
+    message: str
+    watched: List[str]
+    picks: List[str]
+    has_signal: bool
+    intent: Dict[str, object]
+    profile: Dict[str, object]
+    plan: Dict[str, object]
+    candidates_content: List[Dict[str, object]]
+    candidates_adjacent: List[Dict[str, object]]
+    candidates_cold: List[Dict[str, object]]
+    ranked_recs: List[Dict[str, object]]
+    final_recs: List[Dict[str, object]]
+    response: str
+
+
+def _node_intent(state: RecState) -> Dict[str, object]:
+    return {"intent": stage_intent(state["user_id"], state.get("message", ""))}
+
+
+def _node_profile(state: RecState) -> Dict[str, object]:
+    return {"profile": stage_profile(state["user_id"])}
+
+
+def _node_planner(state: RecState) -> Dict[str, object]:
+    picks = set(state.get("picks") or [])
+    plan = stage_planner(
+        state.get("intent", {}),
+        state.get("profile", {}),
+        picks,
+        bool(state.get("has_signal")),
+    )
+    return {"plan": plan}
+
+
+def _node_candidates_content(state: RecState) -> Dict[str, object]:
+    plan = state.get("plan", {})
+    picks = set(state.get("picks") or [])
+    recs = content_recs(state["user_id"], picks, plan.get("limit", 8)) if "content" in plan.get("tools", []) else []
+    return {"candidates_content": recs}
+
+
+def _node_candidates_adjacent(state: RecState) -> Dict[str, object]:
+    plan = state.get("plan", {})
+    picks = set(state.get("picks") or [])
+    recs = adjacent_recs(state["user_id"], picks, plan.get("limit", 8)) if "adjacent" in plan.get("tools", []) else []
+    return {"candidates_adjacent": recs}
+
+
+def _node_candidates_cold(state: RecState) -> Dict[str, object]:
+    plan = state.get("plan", {})
+    picks = set(state.get("picks") or [])
+    recs = cold_recs(picks, plan.get("limit", 8)) if "cold" in plan.get("tools", []) else []
+    return {"candidates_cold": recs}
+
+
+def _node_ranker(state: RecState) -> Dict[str, object]:
+    plan = state.get("plan", {})
+    cands = {
+        "content": state.get("candidates_content", []),
+        "adjacent": state.get("candidates_adjacent", []),
+        "cold": state.get("candidates_cold", []),
+    }
+    return {"ranked_recs": stage_ranker(plan, cands)}
+
+
+def _node_judge(state: RecState) -> Dict[str, object]:
+    picks = set(state.get("picks") or [])
+    recs = stage_judge(
+        state["user_id"],
+        state.get("ranked_recs", []),
+        picks,
+        bool(state.get("has_signal")),
+    )
+    return {"final_recs": recs}
+
+
+def _node_explain(state: RecState) -> Dict[str, object]:
+    plan = state.get("plan", {})
+    strategy = plan.get("strategy", "content_based")
+    response = stage_explain(strategy, state.get("final_recs", []))
+    return {"response": response}
+
+
+def build_recommendation_graph():
+    graph = StateGraph(RecState)
+    graph.add_node("intent", _node_intent)
+    graph.add_node("profile", _node_profile)
+    graph.add_node("planner", _node_planner)
+    graph.add_node("candidates_content", _node_candidates_content)
+    graph.add_node("candidates_adjacent", _node_candidates_adjacent)
+    graph.add_node("candidates_cold", _node_candidates_cold)
+    graph.add_node("ranker", _node_ranker)
+    graph.add_node("judge", _node_judge)
+    graph.add_node("explain", _node_explain)
+    graph.set_entry_point("intent")
+    graph.add_edge("intent", "profile")
+    graph.add_edge("profile", "planner")
+    graph.add_edge("planner", "candidates_content")
+    graph.add_edge("candidates_content", "candidates_adjacent")
+    graph.add_edge("candidates_adjacent", "candidates_cold")
+    graph.add_edge("candidates_cold", "ranker")
+    graph.add_edge("ranker", "judge")
+    graph.add_edge("judge", "explain")
+    graph.add_edge("explain", END)
+    return graph.compile()
+
+
+recommendation_graph = build_recommendation_graph()
+
+# ------------------------
 # API
 # ------------------------
 
@@ -562,35 +679,42 @@ async def chat(req: ChatRequest):
     msg = req.message or ""
 
     # picks/history
-    picks = get_picks(user_id)
+    picks = list(get_picks(user_id))
     watched = get_user_history(user_id)
     has_signal = bool(watched or picks)
 
-    # intent
-    intent = stage_intent(user_id, msg)
-    # profile
-    profile = stage_profile(user_id)
-    # planner
-    plan = stage_planner(intent, profile, picks, has_signal)
-    # candidates
-    cands = stage_candidates(user_id, plan, picks)
-    # rank
-    recs = stage_ranker(plan, cands)
+    initial_state: RecState = {
+        "user_id": user_id,
+        "message": msg,
+        "watched": watched,
+        "picks": picks,
+        "has_signal": has_signal,
+    }
+    result_state = recommendation_graph.invoke(initial_state)
+    recs = result_state.get("final_recs", [])
+    plan = result_state.get("plan", {})
+    intent = result_state.get("intent", {})
+
     # parse choice
     chosen = parse_choice(user_id, msg, recs)
     if chosen:
         add_pick(user_id, chosen)
-        picks = get_picks(user_id)
+        picks = list(get_picks(user_id))
         has_signal = True
-        profile = stage_profile(user_id)
-        plan = stage_planner(intent, profile, picks, has_signal)
-        cands = stage_candidates(user_id, plan, picks)
-        recs = stage_ranker(plan, cands)
-    # judge
-    recs = stage_judge(user_id, recs, picks, has_signal)
-    # explain
+        follow_state: RecState = {
+            "user_id": user_id,
+            "message": msg,
+            "watched": watched,
+            "picks": picks,
+            "has_signal": has_signal,
+        }
+        result_state = recommendation_graph.invoke(follow_state)
+        recs = result_state.get("final_recs", [])
+        plan = result_state.get("plan", {})
+        intent = result_state.get("intent", {})
+
     strategy = plan.get("strategy", "content_based")
-    response = stage_explain(strategy, recs)
+    response = result_state.get("response") or stage_explain(strategy, recs)
     decision = {"strategy": strategy, "reason": plan.get("reason", intent.get("rationale"))}
     return {
         "strategy": strategy,
